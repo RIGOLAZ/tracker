@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TCAS Tracker</title>
+  <style>
+    body { 
+      font-family: system-ui; 
+      background: #1a1a2e; 
+      color: white; 
+      margin: 0; 
+      padding: 20px;
+      text-align: center;
+    }
+    .status { 
+      padding: 30px; 
+      border-radius: 15px; 
+      margin: 20px 0;
+      font-size: 1.5em;
+      font-weight: bold;
+    }
+    .safe { background: #4caf50; }
+    .danger { background: #f44336; animation: pulse 1s infinite; }
+    @keyframes pulse { 50% { opacity: 0.7; } }
+    
+    button {
+      width: 100%;
+      padding: 25px;
+      font-size: 1.3em;
+      border: none;
+      border-radius: 15px;
+      margin: 10px 0;
+      cursor: pointer;
+    }
+    .start { background: #4caf50; color: white; }
+    .stop { background: #f44336; color: white; }
+    .sos { background: #c62828; color: white; }
+    
+    .info { 
+      background: #16213e; 
+      padding: 15px; 
+      border-radius: 10px;
+      margin: 10px 0;
+      font-family: monospace;
+    }
+    
+    #logs { 
+      height: 150px; 
+      overflow-y: auto; 
+      background: #0f0f23;
+      padding: 10px;
+      text-align: left;
+      font-size: 0.9em;
+      border-radius: 10px;
+    }
+  </style>
+</head>
+<body>
+  <h1>🛡️ TCAS Tracker</h1>
+  <div id="deviceId">ID: --</div>
+  
+  <div id="status" class="status safe">
+    En attente...
+  </div>
+  
+  <div class="info">
+    <div>📍 <span id="coords">--</span></div>
+    <div>🔋 <span id="battery">--</span>%</div>
+    <div>📶 Précision: <span id="accuracy">--</span>m</div>
+  </div>
+  
+  <button class="start" onclick="start()">▶ DÉMARRER</button>
+  <button class="stop" onclick="stop()">⏹ ARRÊTER</button>
+  <button class="sos" onclick="sos()">🆘 SOS</button>
+  
+  <div id="logs"></div>
+
+  <!-- Firebase -->
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
+
+  <script>
+    // 🔧 CONFIG FIREBASE (même que ton admin)
+    const firebaseConfig = {
+      apiKey: "AIzaSyCHG7XWHIwiiEo1n1gPZjjYiltHavvJZW4",
+      authDomain: "etralis.firebaseapp.com",
+      projectId: "etralis",
+      // ...
+    };
+    
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
+    
+    // Génère ou récupère l'ID
+    const DEVICE_ID = localStorage.getItem('tcas_id') || 
+                      'MOBILE-' + Math.random().toString(36).substr(2,9).toUpperCase();
+    localStorage.setItem('tcas_id', DEVICE_ID);
+    document.getElementById('deviceId').textContent = 'ID: ' + DEVICE_ID;
+    
+    let watchId = null;
+    let zones = [];
+    
+    // Charge les zones depuis Firestore
+    async function loadZones() {
+      const snap = await db.collection('geofenceZones').get();
+      zones = snap.docs.map(d => ({id: d.id, ...d.data()}));
+      log(`${zones.length} zones chargées`);
+    }
+    
+    function log(msg) {
+      const div = document.createElement('div');
+      div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      document.getElementById('logs').prepend(div);
+    }
+    
+    function getDistance(lat1, lng1, lat2, lng2) {
+      const R = 6371000;
+      const toRad = x => x * Math.PI / 180;
+      const dLat = toRad(lat2 - lat1);
+      const dLng = toRad(lng2 - lng1);
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng/2)**2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+    
+    async function updatePosition(pos) {
+      const {latitude: lat, longitude: lng, accuracy} = pos.coords;
+      
+      // Vérifie geofence
+      let inZone = false;
+      let nearestZone = null;
+      let minDist = Infinity;
+      
+      for (const z of zones) {
+        const dist = getDistance(lat, lng, z.lat, z.lng);
+        if (dist <= z.radius) {
+          inZone = true;
+          if (dist < minDist) {
+            minDist = dist;
+            nearestZone = z;
+          }
+        }
+      }
+      
+      // UI
+      document.getElementById('coords').textContent = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+      document.getElementById('accuracy').textContent = Math.round(accuracy);
+      
+      const statusEl = document.getElementById('status');
+      if (inZone) {
+        statusEl.className = 'status safe';
+        statusEl.textContent = `✅ ${nearestZone.name}`;
+      } else {
+        statusEl.className = 'status danger';
+        statusEl.textContent = '🚨 HORS ZONE!';
+      }
+      
+      // Envoi Firestore
+      const battery = navigator.getBattery ? (await navigator.getBattery()).level * 100 : null;
+      document.getElementById('battery').textContent = battery ? Math.round(battery) : '--';
+      
+      await db.collection('devices').doc(DEVICE_ID).set({
+        deviceId: DEVICE_ID,
+        name: 'Mobile Tracker',
+        type: 'mobile-tracker',
+        location: {lat, lng, accuracy},
+        batteryLevel: battery ? Math.round(battery) : null,
+        status: inZone ? 'active' : 'alert',
+        lastSeen: firebase.firestore.FieldValue.serverTimestamp(),
+        geofenceStatus: {inZone, zoneId: nearestZone?.id || null}
+      }, {merge: true});
+      
+      // Historique
+      await db.collection('devices').doc(DEVICE_ID)
+        .collection('locationHistory').add({
+          lat, lng, accuracy, inZone,
+          timestamp: firebase.firestore.FieldValue.serverTimestamp()
+        });
+      
+      log(inZone ? `Dans ${nearestZone.name}` : 'INTRUSION!');
+      
+      // Alerte si sortie
+      if (!inZone) {
+        await db.collection('alerts').add({
+          deviceId: DEVICE_ID,
+          type: 'intrusion',
+          position: {lat, lng},
+          timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+          status: 'active'
+        });
+      }
+    }
+    
+    async function start() {
+      await loadZones();
+      const perm = await navigator.permissions.query({name: 'geolocation'});
+      if (perm.state === 'denied') {
+        alert('Active la géolocalisation!');
+        return;
+      }
+      
+      watchId = navigator.geolocation.watchPosition(
+        updatePosition,
+        err => log('GPS erreur: ' + err.message),
+        {enableHighAccuracy: true, maximumAge: 0, timeout: 10000}
+      );
+      
+      // Empêche écran de s'éteindre
+      if ('wakeLock' in navigator) {
+        navigator.wakeLock.request('screen');
+      }
+      
+      log('Tracking démarré');
+    }
+    
+    function stop() {
+      if (watchId) navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+      document.getElementById('status').textContent = 'En attente...';
+      log('Arrêté');
+    }
+    
+    async function sos() {
+      const pos = await new Promise((res, rej) => 
+        navigator.geolocation.getCurrentPosition(res, rej)
+      );
+      await db.collection('alerts').add({
+        deviceId: DEVICE_ID,
+        type: 'sos',
+        position: {lat: pos.coords.latitude, lng: pos.coords.longitude},
+        timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+        status: 'active'
+      });
+      log('🆘 SOS ENVOYÉ');
+      alert('Alerte SOS envoyée!');
+    }
+    
+    // Batterie
+    if ('getBattery' in navigator) {
+      navigator.getBattery().then(b => {
+        document.getElementById('battery').textContent = Math.round(b.level * 100);
+      });
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#16213e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>TCAS Tracker</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="/icon-192.png">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { 
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+      background: #1a1a2e; 
+      color: white; 
+      min-height: 100vh;
+      padding: 20px;
+      padding-bottom: 100px;
+    }
+    
+    h1 { text-align: center; margin-bottom: 10px; font-size: 1.8em; }
+    
+    #deviceId { 
+      text-align: center; 
+      color: #888; 
+      font-size: 0.9em;
+      margin-bottom: 15px;
+      font-family: monospace;
+    }
+    
+    .status { 
+      padding: 25px; 
+      border-radius: 15px; 
+      margin: 15px 0;
+      text-align: center;
+      font-size: 1.3em;
+      font-weight: bold;
+      transition: all 0.3s;
+    }
+    .safe { background: #4caf50; }
+    .danger { background: #f44336; animation: pulse 1.5s infinite; }
+    .waiting { background: #ff9800; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    
+    .info { 
+      background: #16213e; 
+      padding: 15px; 
+      border-radius: 12px;
+      margin: 10px 0;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .info-item {
+      text-align: center;
+      padding: 10px;
+      background: #0f0f23;
+      border-radius: 8px;
+    }
+    .info-label { color: #888; font-size: 0.8em; margin-bottom: 5px; }
+    .info-value { font-family: monospace; font-size: 1.1em; }
+    
+    button {
+      width: 100%;
+      padding: 20px;
+      font-size: 1.2em;
+      border: none;
+      border-radius: 12px;
+      margin: 8px 0;
+      cursor: pointer;
+      font-weight: bold;
+      transition: transform 0.1s;
+    }
+    button:active { transform: scale(0.98); }
+    .start { background: #4caf50; color: white; }
+    .stop { background: #f44336; color: white; }
+    .sos { background: #c62828; color: white; }
+    .secondary { background: #0f3460; color: white; }
+    
+    #logs { 
+      height: 120px; 
+      overflow-y: auto; 
+      background: #0f0f23;
+      padding: 10px;
+      font-family: monospace;
+      font-size: 0.85em;
+      border-radius: 10px;
+      margin-top: 15px;
+    }
+    .log-entry { 
+      padding: 3px 0; 
+      border-left: 2px solid #e94560;
+      padding-left: 8px;
+      margin: 3px 0;
+    }
+    
+    /* Modal QR Code */
+    .modal {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.9);
+      z-index: 1000;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
+    .modal.active { display: flex; }
+    .modal-content {
+      background: #16213e;
+      padding: 25px;
+      border-radius: 20px;
+      text-align: center;
+      max-width: 350px;
+      width: 100%;
+    }
+    .modal h2 { margin-bottom: 15px; }
+    #qrcode {
+      margin: 20px auto;
+      padding: 15px;
+      background: white;
+      border-radius: 10px;
+      display: inline-block;
+    }
+    .close-btn {
+      margin-top: 15px;
+      background: #e94560 !important;
+    }
+    
+    .config-section {
+      background: #16213e;
+      padding: 15px;
+      border-radius: 12px;
+      margin: 15px 0;
+    }
+    .config-section h3 {
+      color: #e94560;
+      margin-bottom: 10px;
+      font-size: 1em;
+    }
+    input {
+      width: 100%;
+      padding: 12px;
+      margin: 5px 0;
+      border: none;
+      border-radius: 8px;
+      background: #0f0f23;
+      color: white;
+      font-size: 1em;
+    }
+    input::placeholder { color: #666; }
+    
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <h1>🛡️ TCAS Tracker</h1>
+  <div id="deviceId">ID: --</div>
+  
+  <div id="status" class="status waiting">
+    ⏸️ En attente...
+  </div>
+  
+  <div class="info">
+    <div class="info-item">
+      <div class="info-label">📍 Position</div>
+      <div class="info-value" id="coords">--</div>
+    </div>
+    <div class="info-item">
+      <div class="info-label">🔋 Batterie</div>
+      <div class="info-value" id="battery">--%</div>
+    </div>
+    <div class="info-item">
+      <div class="info-label">📶 Précision</div>
+      <div class="info-value" id="accuracy">--m</div>
+    </div>
+    <div class="info-item">
+      <div class="info-label">🎯 Zone</div>
+      <div class="info-value" id="zoneStatus">--</div>
+    </div>
+  </div>
+  
+  <!-- Boutons principaux -->
+  <button class="start" id="btnStart" onclick="start()">▶ DÉMARRER TRACKING</button>
+  <button class="stop hidden" id="btnStop" onclick="stop()">⏹ ARRÊTER</button>
+  <button class="sos" onclick="sos()">🆘 ALERTE SOS</button>
+  
+  <!-- Boutons secondaires -->
+  <button class="secondary" onclick="showQR()">📱 Afficher QR Code</button>
+  <button class="secondary" onclick="toggleConfig()">⚙️ Configuration</button>
+  
+  <!-- Section Configuration -->
+  <div id="configSection" class="config-section hidden">
+    <h3>Configuration Device</h3>
+    <input type="text" id="inputDeviceName" placeholder="Nom du device" value="Mobile Tracker">
+    <input type="text" id="inputDeviceId" placeholder="ID Device">
+    <button class="secondary" onclick="saveConfig()">💾 Sauvegarder</button>
+  </div>
+  
+  <!-- Logs -->
+  <div id="logs"></div>
+
+  <!-- Modal QR Code -->
+  <div id="qrModal" class="modal" onclick="hideQR(event)">
+    <div class="modal-content" onclick="event.stopPropagation()">
+      <h2>📱 Configurer un autre appareil</h2>
+      <p style="color: #888; font-size: 0.9em; margin-bottom: 15px;">
+        Scanne ce QR code avec un autre téléphone pour le configurer automatiquement
+      </p>
+      <div id="qrcode"></div>
+      <div style="margin-top: 15px; word-break: break-all; font-size: 0.8em; color: #666;" id="qrData"></div>
+      <button class="close-btn" onclick="hideQR()">❌ Fermer</button>
+    </div>
+  </div>
+
+  <!-- Firebase -->
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+  <script>
+    // 🔧 CONFIG FIREBASE - REMPLACE PAR TES VALEURS
+    const firebaseConfig = {
+      apiKey: "AIzaSyCHG7XWHIwiiEo1n1gPZjjYiltHavvJZW4",
+      authDomain: "etralis.firebaseapp.com",
+      projectId: "etralis",
+      storageBucket: "etralis.appspot.com",
+      messagingSenderId: "870023915404",
+      appId: "G-WGWJKW5Z1Y"
+    };
+    
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
+    
+    // Configuration device
+    let deviceConfig = {
+      id: localStorage.getItem('tcas_id') || 'MOBILE-' + Math.random().toString(36).substr(2,9).toUpperCase(),
+      name: localStorage.getItem('tcas_name') || 'Mobile Tracker',
+      type: 'mobile-tracker'
+    };
+    
+    // Sauvegarde config
+    localStorage.setItem('tcas_id', deviceConfig.id);
+    localStorage.setItem('tcas_name', deviceConfig.name);
+    
+    // UI init
+    document.getElementById('deviceId').textContent = 'ID: ' + deviceConfig.id;
+    document.getElementById('inputDeviceId').value = deviceConfig.id;
+    document.getElementById('inputDeviceName').value = deviceConfig.name;
+    
+    let watchId = null;
+    let zones = [];
+    let isTracking = false;
+    
+    // Service Worker
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
+    
+    function log(msg) {
+      const div = document.createElement('div');
+      div.className = 'log-entry';
+      div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      document.getElementById('logs').prepend(div);
+    }
+    
+    function getDistance(lat1, lng1, lat2, lng2) {
+      const R = 6371000;
+      const toRad = x => x * Math.PI / 180;
+      const dLat = toRad(lat2 - lat1);
+      const dLng = toRad(lng2 - lng1);
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng/2)**2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+    
+    async function loadZones() {
+      try {
+        const snap = await db.collection('geofenceZones').get();
+        zones = snap.docs.map(d => ({id: d.id, ...d.data()}));
+        log(`✅ ${zones.length} zones chargées`);
+        return zones;
+      } catch (err) {
+        log(`❌ Erreur zones: ${err.message}`);
+        return [];
+      }
+    }
+    
+    async function updatePosition(pos) {
+      const {latitude: lat, longitude: lng, accuracy} = pos.coords;
+      
+      // Geofencing
+      let inZone = false;
+      let nearestZone = null;
+      let minDist = Infinity;
+      
+      for (const z of zones) {
+        const dist = getDistance(lat, lng, z.lat, z.lng);
+        if (dist <= z.radius) {
+          inZone = true;
+          if (dist < minDist) {
+            minDist = dist;
+            nearestZone = z;
+          }
+        }
+      }
+      
+      // UI Update
+      document.getElementById('coords').textContent = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+      document.getElementById('accuracy').textContent = Math.round(accuracy) + 'm';
+      document.getElementById('zoneStatus').textContent = inZone ? (nearestZone?.name || 'Sécurisé') : 'HORS ZONE';
+      
+      const statusEl = document.getElementById('status');
+      if (inZone) {
+        statusEl.className = 'status safe';
+        statusEl.textContent = `✅ ${nearestZone?.name || 'Zone sécurisée'}`;
+      } else {
+        statusEl.className = 'status danger';
+        statusEl.textContent = '🚨 INTRUSION DÉTECTÉE!';
+      }
+      
+      // Batterie
+      let batteryLevel = null;
+      if ('getBattery' in navigator) {
+        const battery = await navigator.getBattery();
+        batteryLevel = Math.round(battery.level * 100);
+        document.getElementById('battery').textContent = batteryLevel + '%';
+      }
+      
+      // Envoi Firestore
+      try {
+        await db.collection('devices').doc(deviceConfig.id).set({
+          deviceId: deviceConfig.id,
+          name: deviceConfig.name,
+          type: deviceConfig.type,
+          location: {lat, lng, accuracy},
+          batteryLevel,
+          status: inZone ? 'active' : 'alert',
+          lastSeen: firebase.firestore.FieldValue.serverTimestamp(),
+          geofenceStatus: {
+            inZone, 
+            zoneId: nearestZone?.id || null,
+            zoneName: nearestZone?.name || null,
+            distance: minDist === Infinity ? null : Math.round(minDist)
+          }
+        }, {merge: true});
+        
+        // Historique
+        await db.collection('devices').doc(deviceConfig.id)
+          .collection('locationHistory').add({
+            lat, lng, accuracy, inZone,
+            timestamp: firebase.firestore.FieldValue.serverTimestamp()
+          });
+        
+        // Alerte intrusion
+        if (!inZone) {
+          await db.collection('alerts').add({
+            deviceId: deviceConfig.id,
+            deviceName: deviceConfig.name,
+            type: 'intrusion',
+            position: {lat, lng},
+            message: `Intrusion détectée! ${deviceConfig.name} hors de toute zone sécurisée`,
+            timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+            status: 'active'
+          });
+          
+          // Notification locale
+          if ('Notification' in window && Notification.permission === 'granted') {
+            new Notification('🚨 ALERTE TCAS', {
+              body: 'Vous êtes hors de la zone sécurisée!',
+              icon: '/icon-192.png'
+            });
+          }
+        }
+        
+      } catch (err) {
+        log(`❌ Erreur sync: ${err.message}`);
+      }
+    }
+    
+    async function start() {
+      if (isTracking) return;
+      
+      // Permission notifications
+      if ('Notification' in window) {
+        Notification.requestPermission();
+      }
+      
+      // Permission GPS
+      const perm = await navigator.permissions.query({name: 'geolocation'});
+      if (perm.state === 'denied') {
+        alert('Active la géolocalisation dans les paramètres!');
+        return;
+      }
+      
+      await loadZones();
+      
+      watchId = navigator.geolocation.watchPosition(
+        updatePosition,
+        err => log(`❌ GPS: ${err.message}`),
+        {
+          enableHighAccuracy: true,
+          maximumAge: 0,
+          timeout: 10000
+        }
+      );
+      
+      // Wake lock
+      if ('wakeLock' in navigator) {
+        navigator.wakeLock.request('screen').catch(() => {});
+      }
+      
+      isTracking = true;
+      document.getElementById('btnStart').classList.add('hidden');
+      document.getElementById('btnStop').classList.remove('hidden');
+      log('▶ Tracking démarré');
+    }
+    
+    function stop() {
+      if (watchId) navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+      isTracking = false;
+      document.getElementById('btnStart').classList.remove('hidden');
+      document.getElementById('btnStop').classList.add('hidden');
+      document.getElementById('status').className = 'status waiting';
+      document.getElementById('status').textContent = '⏸️ En attente...';
+      log('⏹ Tracking arrêté');
+    }
+    
+    async function sos() {
+      try {
+        const pos = await new Promise((res, rej) => 
+          navigator.geolocation.getCurrentPosition(res, rej, {enableHighAccuracy: true})
+        );
+        
+        await db.collection('alerts').add({
+          deviceId: deviceConfig.id,
+          deviceName: deviceConfig.name,
+          type: 'sos',
+          position: {
+            lat: pos.coords.latitude, 
+            lng: pos.coords.longitude
+          },
+          message: `🆘 SOS! ${deviceConfig.name} demande de l'aide URGENTE`,
+          timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+          status: 'active'
+        });
+        
+        log('🆘 SOS ENVOYÉ');
+        alert('Alerte SOS envoyée aux administrateurs!');
+        
+      } catch (err) {
+        alert('Erreur GPS: ' + err.message);
+      }
+    }
+    
+    // QR Code Functions
+    function showQR() {
+      const config = {
+        deviceId: deviceConfig.id,
+        name: deviceConfig.name,
+        type: deviceConfig.type,
+        firebase: {
+          projectId: firebaseConfig.projectId,
+          apiKey: firebaseConfig.apiKey,
+          authDomain: firebaseConfig.authDomain
+        }
+      };
+      
+      const configString = btoa(JSON.stringify(config));
+      const setupUrl = `${window.location.origin}/setup?config=${configString}`;
+      
+      document.getElementById('qrcode').innerHTML = '';
+      document.getElementById('qrData').textContent = setupUrl.substring(0, 50) + '...';
+      
+      new QRCode(document.getElementById('qrcode'), {
+        text: setupUrl,
+        width: 200,
+        height: 200,
+        colorDark: '#000000',
+        colorLight: '#ffffff',
+        correctLevel: QRCode.CorrectLevel.H
+      });
+      
+      document.getElementById('qrModal').classList.add('active');
+      log('📱 QR Code généré');
+    }
+    
+    function hideQR(e) {
+      if (!e || e.target.id === 'qrModal') {
+        document.getElementById('qrModal').classList.remove('active');
+      }
+    }
+    
+    // Config Functions
+    function toggleConfig() {
+      document.getElementById('configSection').classList.toggle('hidden');
+    }
+    
+    function saveConfig() {
+      const newId = document.getElementById('inputDeviceId').value.trim().toUpperCase();
+      const newName = document.getElementById('inputDeviceName').value.trim();
+      
+      if (newId) {
+        deviceConfig.id = newId;
+        localStorage.setItem('tcas_id', newId);
+      }
+      if (newName) {
+        deviceConfig.name = newName;
+        localStorage.setItem('tcas_name', newName);
+      }
+      
+      document.getElementById('deviceId').textContent = 'ID: ' + deviceConfig.id;
+      document.getElementById('configSection').classList.add('hidden');
+      log('💾 Config sauvegardée');
+      alert('Configuration sauvegardée!');
+    }
+    
+    // Check URL pour config QR
+    const urlParams = new URLSearchParams(window.location.search);
+    const configParam = urlParams.get('config');
+    if (configParam) {
+      try {
+        const importedConfig = JSON.parse(atob(configParam));
+        if (confirm(`Importer la config de "${importedConfig.name}" ?`)) {
+          deviceConfig.id = importedConfig.deviceId;
+          deviceConfig.name = importedConfig.name;
+          deviceConfig.type = importedConfig.type;
+          localStorage.setItem('tcas_id', deviceConfig.id);
+          localStorage.setItem('tcas_name', deviceConfig.name);
+          document.getElementById('deviceId').textContent = 'ID: ' + deviceConfig.id;
+          log('📥 Config importée via QR');
+        }
+      } catch (e) {
+        console.error('QR invalide', e);
+      }
+    }
+    
+    log('🚀 TCAS Tracker prêt');
+  </script>
+</body>
+</html>
