@@ -95,8 +95,10 @@
       padding-left: 8px;
       margin: 3px 0;
     }
+    .log-entry.debug { border-left-color: #2196f3; color: #64b5f6; }
+    .log-entry.success { border-left-color: #4caf50; color: #81c784; }
+    .log-entry.error { border-left-color: #f44336; color: #e57373; }
     
-    /* Modal QR Code */
     .modal {
       display: none;
       position: fixed;
@@ -153,6 +155,18 @@
     input::placeholder { color: #666; }
     
     .hidden { display: none !important; }
+    
+    .debug-info {
+      background: #0f3460;
+      padding: 10px;
+      border-radius: 8px;
+      margin-top: 10px;
+      font-size: 0.75em;
+      font-family: monospace;
+      max-height: 100px;
+      overflow-y: auto;
+    }
+    .debug-info div { margin: 2px 0; }
   </style>
 </head>
 <body>
@@ -182,16 +196,21 @@
     </div>
   </div>
   
-  <!-- Boutons principaux -->
+  <!-- Debug info -->
+  <div class="debug-info" id="debugInfo">
+    <div><strong>Debug Geofencing:</strong></div>
+    <div id="debugZones">Zones chargées: 0</div>
+    <div id="debugPosition">Position: --</div>
+    <div id="debugStatus">Statut: --</div>
+    <div id="debugCooldown">Cooldown: --</div>
+  </div>
+  
   <button class="start" id="btnStart" onclick="start()">▶ DÉMARRER TRACKING</button>
   <button class="stop hidden" id="btnStop" onclick="stop()">⏹ ARRÊTER</button>
   <button class="sos" onclick="sos()">🆘 ALERTE SOS</button>
-  
-  <!-- Boutons secondaires -->
   <button class="secondary" onclick="showQR()">📱 Afficher QR Code</button>
   <button class="secondary" onclick="toggleConfig()">⚙️ Configuration</button>
   
-  <!-- Section Configuration -->
   <div id="configSection" class="config-section hidden">
     <h3>Configuration Device</h3>
     <input type="text" id="inputDeviceName" placeholder="Nom du device" value="Mobile Tracker">
@@ -199,10 +218,8 @@
     <button class="secondary" onclick="saveConfig()">💾 Sauvegarder</button>
   </div>
   
-  <!-- Logs -->
   <div id="logs"></div>
 
-  <!-- Modal QR Code -->
   <div id="qrModal" class="modal" onclick="hideQR(event)">
     <div class="modal-content" onclick="event.stopPropagation()">
       <h2>📱 Configurer un autre appareil</h2>
@@ -215,13 +232,11 @@
     </div>
   </div>
 
-  <!-- Firebase -->
   <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 
   <script>
-    // 🔧 CONFIG FIREBASE - REMPLACE PAR TES VALEURS
     const firebaseConfig = {
       apiKey: "AIzaSyCHG7XWHIwiiEo1n1gPZjjYiltHavvJZW4",
       authDomain: "etralis.firebaseapp.com",
@@ -234,18 +249,15 @@
     firebase.initializeApp(firebaseConfig);
     const db = firebase.firestore();
     
-    // Configuration device
     let deviceConfig = {
       id: localStorage.getItem('tcas_id') || 'MOBILE-' + Math.random().toString(36).substr(2,9).toUpperCase(),
       name: localStorage.getItem('tcas_name') || 'Mobile Tracker',
       type: 'mobile-tracker'
     };
     
-    // Sauvegarde config
     localStorage.setItem('tcas_id', deviceConfig.id);
     localStorage.setItem('tcas_name', deviceConfig.name);
     
-    // UI init
     document.getElementById('deviceId').textContent = 'ID: ' + deviceConfig.id;
     document.getElementById('inputDeviceId').value = deviceConfig.id;
     document.getElementById('inputDeviceName').value = deviceConfig.name;
@@ -254,35 +266,87 @@
     let zones = [];
     let isTracking = false;
     
-    // Service Worker
+    // Variables anti-spam
+    let previousInZone = null;
+    let lastAlertTime = 0;
+    const ALERT_COOLDOWN = 120000; // 2 minutes
+    const HYSTERESIS_MARGIN = 30;  // 30 mètres
+    
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js').catch(() => {});
     }
     
-    function log(msg) {
+    function log(msg, type = 'normal') {
       const div = document.createElement('div');
-      div.className = 'log-entry';
+      div.className = `log-entry ${type}`;
       div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
       document.getElementById('logs').prepend(div);
     }
     
+    // Calcul distance Haversine
     function getDistance(lat1, lng1, lat2, lng2) {
       const R = 6371000;
       const toRad = x => x * Math.PI / 180;
       const dLat = toRad(lat2 - lat1);
       const dLng = toRad(lng2 - lng1);
       const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng/2)**2;
-      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      return R * c;
+    }
+    
+    // 🆕 FONCTION: Vérifier si un point est dans un polygone (Ray Casting)
+    function isPointInPolygon(point, polygon) {
+      const x = point.lat, y = point.lng;
+      let inside = false;
+      
+      for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+        const xi = polygon[i].lat, yi = polygon[i].lng;
+        const xj = polygon[j].lat, yj = polygon[j].lng;
+        
+        const intersect = ((yi > y) !== (yj > y)) &&
+            (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+        if (intersect) inside = !inside;
+      }
+      
+      return inside;
+    }
+    
+    // Calculer le centre d'un polygone (pour l'affichage)
+    function getPolygonCenter(coordinates) {
+      let lat = 0, lng = 0;
+      coordinates.forEach(c => {
+        lat += c.lat;
+        lng += c.lng;
+      });
+      return { lat: lat / coordinates.length, lng: lng / coordinates.length };
     }
     
     async function loadZones() {
       try {
-        const snap = await db.collection('geofenceZones').get();
-        zones = snap.docs.map(d => ({id: d.id, ...d.data()}));
-        log(`✅ ${zones.length} zones chargées`);
+        const snap = await db.collection('zones').get();
+        zones = snap.docs.map(d => {
+          const data = d.data();
+          // Calculer le centre si c'est un polygone
+          if (data.coordinates && data.coordinates.length > 0) {
+            const center = getPolygonCenter(data.coordinates);
+            data.lat = center.lat;
+            data.lng = center.lng;
+          }
+          return { id: d.id, ...data };
+        });
+        
+        log(`✅ ${zones.length} zones chargées`, 'success');
+        document.getElementById('debugZones').textContent = `Zones: ${zones.length} (${zones.filter(z => z.coordinates?.length > 2).length} polygones, ${zones.filter(z => !z.coordinates || z.coordinates.length <= 2).length} cercles)`;
+        
+        // Log détail des zones
+        zones.forEach(z => {
+          const type = z.coordinates?.length > 2 ? 'POLYGONE' : 'CERCLE';
+          log(`  📍 ${z.name}: ${type}`, 'debug');
+        });
+        
         return zones;
       } catch (err) {
-        log(`❌ Erreur zones: ${err.message}`);
+        log(`❌ Erreur zones: ${err.message}`, 'error');
         return [];
       }
     }
@@ -290,19 +354,56 @@
     async function updatePosition(pos) {
       const {latitude: lat, longitude: lng, accuracy} = pos.coords;
       
-      // Geofencing
+      // Debug
+      document.getElementById('debugPosition').textContent = `Pos: ${lat.toFixed(6)}, ${lng.toFixed(6)} (±${Math.round(accuracy)}m)`;
+      
+      // 🎯 GEOFENCING AVEC POLYGONES ET CERCLES
       let inZone = false;
       let nearestZone = null;
-      let minDist = Infinity;
+      let zoneDetails = [];
       
       for (const z of zones) {
-        const dist = getDistance(lat, lng, z.lat, z.lng);
-        if (dist <= z.radius) {
-          inZone = true;
-          if (dist < minDist) {
-            minDist = dist;
-            nearestZone = z;
+        if (!z.lat || !z.lng) continue;
+        
+        let isInThisZone = false;
+        let distance = null;
+        
+        // 🔧 Détecter si c'est un polygone ou un cercle
+        const isPolygon = z.coordinates && z.coordinates.length > 2;
+        
+        if (isPolygon) {
+          // 🆕 POLYGONE: utiliser Ray Casting
+          isInThisZone = isPointInPolygon({lat, lng}, z.coordinates);
+          distance = getDistance(lat, lng, z.lat, z.lng); // Distance au centre pour info
+          
+          log(`Zone ${z.name} (POLYGONE): in=${isInThisZone}`, 'debug');
+          
+        } else {
+          // CERCLE: utiliser la distance avec hysteresis
+          distance = getDistance(lat, lng, z.lat, z.lng);
+          
+          let effectiveRadius = z.radius || 100;
+          if (previousInZone === true) {
+            effectiveRadius += HYSTERESIS_MARGIN; // Plus dur pour sortir
+          } else if (previousInZone === false) {
+            effectiveRadius = Math.max(effectiveRadius - HYSTERESIS_MARGIN, 10); // Plus dur pour rentrer
           }
+          
+          isInThisZone = distance <= effectiveRadius;
+          
+          log(`Zone ${z.name} (CERCLE): dist=${Math.round(distance)}m, radius=${Math.round(effectiveRadius)}m, in=${isInThisZone}`, 'debug');
+        }
+        
+        zoneDetails.push({
+          name: z.name,
+          type: isPolygon ? 'polygone' : 'cercle',
+          distance: distance ? Math.round(distance) : null,
+          inZone: isInThisZone
+        });
+        
+        if (isInThisZone) {
+          inZone = true;
+          nearestZone = z;
         }
       }
       
@@ -317,8 +418,12 @@
         statusEl.textContent = `✅ ${nearestZone?.name || 'Zone sécurisée'}`;
       } else {
         statusEl.className = 'status danger';
-        statusEl.textContent = '🚨 INTRUSION DÉTECTÉE!';
+        statusEl.textContent = '🚨 HORS ZONE';
       }
+      
+      // Debug status
+      const debugStatus = inZone ? `DANS ${nearestZone?.name}` : 'HORS ZONE';
+      document.getElementById('debugStatus').textContent = `Statut: ${debugStatus} (précédent: ${previousInZone === null ? 'null' : previousInZone ? 'IN' : 'OUT'})`;
       
       // Batterie
       let batteryLevel = null;
@@ -328,7 +433,7 @@
         document.getElementById('battery').textContent = batteryLevel + '%';
       }
       
-      // Envoi Firestore
+      // Envoi Firestore (device)
       try {
         await db.collection('devices').doc(deviceConfig.id).set({
           deviceId: deviceConfig.id,
@@ -342,52 +447,79 @@
             inZone, 
             zoneId: nearestZone?.id || null,
             zoneName: nearestZone?.name || null,
-            distance: minDist === Infinity ? null : Math.round(minDist)
+            zoneDetails: zoneDetails.slice(0, 3) // Limiter pour Firestore
           }
         }, {merge: true});
         
-        // Historique
+        // Historique position
         await db.collection('devices').doc(deviceConfig.id)
           .collection('locationHistory').add({
             lat, lng, accuracy, inZone,
             timestamp: firebase.firestore.FieldValue.serverTimestamp()
           });
         
-        // Alerte intrusion
-        if (!inZone) {
+        // 🛡️ ALERTE ANTI-SPAM
+        const now = Date.now();
+        const justExited = (previousInZone === true) && (inZone === false);
+        const cooldownExpired = (now - lastAlertTime) > ALERT_COOLDOWN;
+        
+        document.getElementById('debugCooldown').textContent = `Cooldown: ${cooldownExpired ? 'OK' : Math.round((ALERT_COOLDOWN - (now - lastAlertTime))/1000) + 's'}`;
+        
+        if (justExited && cooldownExpired) {
+          log('🚨 CRÉATION ALERTE SORTIE DE ZONE', 'error');
+          
           await db.collection('alerts').add({
             deviceId: deviceConfig.id,
             deviceName: deviceConfig.name,
-            type: 'intrusion',
+            type: 'ZONE_EXIT',
             position: {lat, lng},
-            message: `Intrusion détectée! ${deviceConfig.name} hors de toute zone sécurisée`,
+            message: `${deviceConfig.name} est sorti de la zone sécurisée`,
             timestamp: firebase.firestore.FieldValue.serverTimestamp(),
-            status: 'active'
+            status: 'active',
+            zoneDetails: zoneDetails
           });
+          
+          lastAlertTime = now;
+          log('✅ Alerte créée avec succès', 'success');
           
           // Notification locale
           if ('Notification' in window && Notification.permission === 'granted') {
             new Notification('🚨 ALERTE TCAS', {
-              body: 'Vous êtes hors de la zone sécurisée!',
-              icon: '/icon-192.png'
+              body: 'Vous êtes sorti de la zone sécurisée!',
+              icon: '/icon-192.png',
+              vibrate: [200, 100, 200]
             });
           }
+        } else if (justExited && !cooldownExpired) {
+          const remaining = Math.round((ALERT_COOLDOWN - (now - lastAlertTime))/1000);
+          log(`⏳ Sortie détectée mais cooldown (${remaining}s restantes)`, 'debug');
         }
         
+        // Log transition
+        if (previousInZone !== null && previousInZone !== inZone) {
+          log(`${inZone ? '✅ Entrée' : '🚨 Sortie'} zone ${nearestZone?.name || ''}`, inZone ? 'success' : 'error');
+        }
+        
+        // Mettre à jour l'état précédent
+        previousInZone = inZone;
+        
       } catch (err) {
-        log(`❌ Erreur sync: ${err.message}`);
+        log(`❌ Erreur sync: ${err.message}`, 'error');
+        console.error('Erreur complète:', err);
       }
     }
     
     async function start() {
       if (isTracking) return;
       
-      // Permission notifications
+      // Reset
+      previousInZone = null;
+      lastAlertTime = 0;
+      
       if ('Notification' in window) {
         Notification.requestPermission();
       }
       
-      // Permission GPS
       const perm = await navigator.permissions.query({name: 'geolocation'});
       if (perm.state === 'denied') {
         alert('Active la géolocalisation dans les paramètres!');
@@ -396,17 +528,23 @@
       
       await loadZones();
       
+      // Première position immédiate
+      navigator.geolocation.getCurrentPosition(
+        updatePosition,
+        err => log(`❌ GPS init: ${err.message}`, 'error'),
+        {enableHighAccuracy: true, timeout: 10000}
+      );
+      
       watchId = navigator.geolocation.watchPosition(
         updatePosition,
-        err => log(`❌ GPS: ${err.message}`),
+        err => log(`❌ GPS: ${err.message}`, 'error'),
         {
           enableHighAccuracy: true,
-          maximumAge: 0,
+          maximumAge: 5000,
           timeout: 10000
         }
       );
       
-      // Wake lock
       if ('wakeLock' in navigator) {
         navigator.wakeLock.request('screen').catch(() => {});
       }
@@ -414,13 +552,14 @@
       isTracking = true;
       document.getElementById('btnStart').classList.add('hidden');
       document.getElementById('btnStop').classList.remove('hidden');
-      log('▶ Tracking démarré');
+      log('▶ Tracking démarré', 'success');
     }
     
     function stop() {
       if (watchId) navigator.geolocation.clearWatch(watchId);
       watchId = null;
       isTracking = false;
+      previousInZone = null;
       document.getElementById('btnStart').classList.remove('hidden');
       document.getElementById('btnStop').classList.add('hidden');
       document.getElementById('status').className = 'status waiting';
@@ -447,7 +586,7 @@
           status: 'active'
         });
         
-        log('🆘 SOS ENVOYÉ');
+        log('🆘 SOS ENVOYÉ', 'error');
         alert('Alerte SOS envoyée aux administrateurs!');
         
       } catch (err) {
@@ -455,7 +594,6 @@
       }
     }
     
-    // QR Code Functions
     function showQR() {
       const config = {
         deviceId: deviceConfig.id,
@@ -493,7 +631,6 @@
       }
     }
     
-    // Config Functions
     function toggleConfig() {
       document.getElementById('configSection').classList.toggle('hidden');
     }
@@ -513,7 +650,7 @@
       
       document.getElementById('deviceId').textContent = 'ID: ' + deviceConfig.id;
       document.getElementById('configSection').classList.add('hidden');
-      log('💾 Config sauvegardée');
+      log('💾 Config sauvegardée', 'success');
       alert('Configuration sauvegardée!');
     }
     
@@ -530,14 +667,14 @@
           localStorage.setItem('tcas_id', deviceConfig.id);
           localStorage.setItem('tcas_name', deviceConfig.name);
           document.getElementById('deviceId').textContent = 'ID: ' + deviceConfig.id;
-          log('📥 Config importée via QR');
+          log('📥 Config importée via QR', 'success');
         }
       } catch (e) {
         console.error('QR invalide', e);
       }
     }
     
-    log('🚀 TCAS Tracker prêt');
+    log('🚀 TCAS Tracker prêt - Gestion POLYGONES + CERCLES', 'success');
   </script>
 </body>
 </html>
